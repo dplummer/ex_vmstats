@@ -1,53 +1,84 @@
 defmodule ExVmstats do
   use GenServer
 
-  defstruct [:backend, :use_histogram, :interval, :sched_time, :prev_sched, :timer_ref, :namespace, :prev_io, :prev_gc]
-
   @timer_msg :interval_elapsed
 
-  def start_link do
-    GenServer.start_link(__MODULE__, [])
-  end
+  defmodule State do
+    defstruct [
+      :backend,
+      :use_histogram,
+      :interval,
+      :sched_time,
+      :prev_sched,
+      :timer_ref,
+      :namespace,
+      :prev_io,
+      :prev_gc
+    ]
 
-  def init(_args) do
-    interval = Application.get_env(:ex_vmstats, :interval, 3000)
-    namespace = Application.get_env(:ex_vmstats, :namespace, "vm_stats")
-    use_histogram = Application.get_env(:ex_vmstats, :use_histogram, false)
+    def new(conf \\ []) do
+      interval = kword_or_app(conf, :interval, 3000)
+      %__MODULE__{
+        interval: interval,
+        namespace: kword_or_app(conf, :namespace, "vm_stats"),
+        use_histogram: kword_or_app(conf, :use_histogram, false),
+        sched_time: sched_time(kword_or_app(conf, :sched_time, false)),
+        backend: backend(kword_or_app(conf, :backend, :ex_statsd)),
+        prev_sched: prev_sched(),
+        timer_ref: ExVmstats.start_timer(interval),
+        prev_io: prev_io(),
+        prev_gc: :erlang.statistics(:garbage_collection)
+      }
+    end
 
-    sched_time =
-      case {sched_time_available?(), Application.get_env(:ex_vmstats, :sched_time, false)} do
+    defp prev_io do
+      {{:input, input}, {:output, output}} = :erlang.statistics(:io)
+      {input, output}
+    end
+
+    defp prev_sched do
+      :erlang.statistics(:scheduler_wall_time)
+      |> Enum.sort
+    end
+
+    defp sched_time(enabled) do
+      case {sched_time_available?(), enabled} do
         {true, true} -> :enabled
         {true, _} -> :disabled
         {false, _} -> :unavailable
       end
+    end
 
-    prev_sched =
-      :erlang.statistics(:scheduler_wall_time)
-      |> Enum.sort
+    defp backend(:ex_statsd), do: ExVmstats.Backends.ExStatsD
+    defp backend(backend), do: backend
 
-    backend =
-      Application.get_env(:ex_vmstats, :backend, :ex_statsd)
-      |> get_backend
+    defp kword_or_app(conf, key, default) do
+      Application.get_env(:ex_vmstats, key, Keyword.get(conf, key, default))
+    end
 
-    {{:input, input}, {:output, output}} = :erlang.statistics(:io)
+    defp sched_time_available? do
+      try do
+        :erlang.system_flag(:scheduler_wall_time, true)
+      else
+        _ -> true
+      catch
+        _ -> true
+      rescue
+        ArgumentError -> false
+      end
+    end
+  end
 
-    state = %__MODULE__{
-      backend: backend,
-      use_histogram: use_histogram,
-      interval: interval,
-      sched_time: sched_time,
-      prev_sched: prev_sched,
-      timer_ref: :erlang.start_timer(interval, self(), @timer_msg),
-      namespace: namespace,
-      prev_io: {input, output},
-      prev_gc: :erlang.statistics(:garbage_collection)
-    }
+  def start_link(conf \\ []) do
+    GenServer.start_link(__MODULE__, conf)
+  end
 
-    {:ok, state}
+  def init(conf) do
+    {:ok, State.new(conf)}
   end
 
   def handle_info({:timeout, _timer_ref, @timer_msg}, state) do
-    %__MODULE__{interval: interval, namespace: namespace, backend: backend} = state
+    %State{interval: interval, namespace: namespace, backend: backend} = state
 
     metric_name = fn (name) -> metric(namespace, name) end
     memory_metric_name = fn (name) -> memory_metric(namespace, name) end
@@ -90,7 +121,7 @@ defmodule ExVmstats do
     end
 
     # Incremental values
-    %__MODULE__{prev_io: {old_input, old_output}, prev_gc: {old_gcs, old_words, _}} = state
+    %State{prev_io: {old_input, old_output}, prev_gc: {old_gcs, old_words, _}} = state
 
     {{:input, input}, {:output, output}} = :erlang.statistics(:io)
 
@@ -124,9 +155,13 @@ defmodule ExVmstats do
           nil
       end
 
-    timer_ref = :erlang.start_timer(interval, self(), @timer_msg)
+    timer_ref = start_timer(interval)
 
     {:noreply, %{state | timer_ref: timer_ref, prev_sched: sched, prev_io: {input, output}, prev_gc: gc}}
+  end
+
+  def start_timer(interval) do
+    :erlang.start_timer(interval, self(), @timer_msg)
   end
 
   defp metric(namespace, metric) do
@@ -137,25 +172,10 @@ defmodule ExVmstats do
     "#{namespace}.memory.#{metric}"
   end
 
-  defp gauge_or_hist(%__MODULE__{use_histogram: true, backend: backend}, value, metric) do
+  defp gauge_or_hist(%State{use_histogram: true, backend: backend}, value, metric) do
     backend.histogram(value, metric)
   end
-  defp gauge_or_hist(%__MODULE__{backend: backend}, value, metric), do: backend.gauge(value, metric)
-
-  defp get_backend(:ex_statsd), do: ExVmstats.Backends.ExStatsD
-  defp get_backend(backend), do: backend
-
-  defp sched_time_available? do
-    try do
-      :erlang.system_flag(:scheduler_wall_time, true)
-    else
-      _ -> true
-    catch
-      _ -> true
-    rescue
-      ArgumentError -> false
-    end
-  end
+  defp gauge_or_hist(%State{backend: backend}, value, metric), do: backend.gauge(value, metric)
 
   defp wall_time_diff(prev_sched, new_sched) do
     for {{i, prev_active, prev_total}, {i, new_active, new_total}} <- Enum.zip(prev_sched, new_sched) do

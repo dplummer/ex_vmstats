@@ -1,2 +1,2 @@
-%{"ex_statsd": {:hex, :ex_statsd, "0.5.3", "e86dd97e25dbc80786e7d22b3c5537f2052a7e12daaaa7e6f2b9c34d03dbbd44", [:mix], []},
+%{"ex_statsd": {:hex, :ex_statsd, "0.5.3", "e86dd97e25dbc80786e7d22b3c5537f2052a7e12daaaa7e6f2b9c34d03dbbd44", [:mix], [], "hexpm"},
   "statix": {:hex, :statix, "1.0.0", "836c0752ad2b568dcdc9b1e67df0df91ad491ea1e19965ac219a9a0569e7e338", [:mix], []}}
